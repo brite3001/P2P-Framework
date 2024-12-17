@@ -5,8 +5,8 @@ import time
 import os
 import random
 
-from .node import Node
-from .logs import get_logger
+from node import Node
+from logs import get_logger
 
 logging = get_logger("runner")
 
@@ -30,6 +30,7 @@ async def main():
             router_list.append(f"tcp://127.0.0.1:{20001+i}")
 
     this_node = Node(
+        id=str(docker_node_id),
         router_bind=f"tcp://127.0.0.1:{20001 + docker_node_id}",
         publisher_bind=f"tcp://127.0.0.1:{21001 + docker_node_id}",
     )
@@ -63,21 +64,18 @@ async def main():
 
     await asyncio.sleep(5)
 
-    pad = 10**935
-    for i in range(1, 1000):
-        # Randomize the process of sending commands with a certain probability
-        if random.random() < 0.5:  # Adjust probability as needed
-            # logging.error(f"Node {docker_node_id} sending commands at iteration {i}")
-            for _ in range(random.randint(5, 15)):
-                gos = Gossip(
-                    message_type="Gossip", timestamp=int(time.time()), padding=pad
-                )
-                this_node.command(gos)
+    # pad = 10**935
+    # for i in range(1, 1000):
+    #     # Randomize the process of sending commands with a certain probability
+    #     if random.random() < 0.5:  # Adjust probability as needed
+    #         # logging.error(f"Node {docker_node_id} sending commands at iteration {i}")
+    #         for _ in range(random.randint(5, 15)):
+    #             gos = Gossip(
+    #                 message_type="Gossip", timestamp=int(time.time()), padding=pad
+    #             )
+    #             this_node.command(gos)
 
-        await asyncio.sleep(random.randint(1, 2))
-
-    # this_node.scheduler.pause_job(this_node.increase_job_id)
-    # this_node.scheduler.pause_job(this_node.decrease_job_id)
+    #     await asyncio.sleep(random.randint(1, 2))
 
     # await asyncio.sleep(15)
 
