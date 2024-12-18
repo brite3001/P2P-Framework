@@ -1,5 +1,5 @@
 from attrs import define, field, asdict, frozen, validators
-from typing import Union
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio
 import aiozmq
 import zmq
@@ -12,7 +12,6 @@ from logs import get_logger
 @frozen
 class HealthCheck:
     message_type: str = field(validator=[validators.instance_of(str)])
-    alive: bool = field(validator=[validators.instance_of(bool)])
 
 
 @frozen
@@ -20,7 +19,6 @@ class PeerInformation:
     id: str = field(validator=[validators.instance_of(str)])
     router_address: str = field(validator=[validators.instance_of(str)])
     publisher_address: str = field(validator=[validators.instance_of(str)])
-    alive: bool = field(validator=[validators.instance_of(bool)])
 
 
 @frozen
@@ -60,6 +58,13 @@ class Node:
     subscribed_topics: set = field(factory=set)  # stores topics as bytes
     rep_lock = field(factory=lambda: asyncio.Lock())
 
+    # Scheduler
+    scheduler = field(factory=lambda: AsyncIOScheduler())
+
+    # Failure Modes
+    is_peer_alive: dict[str, bool] = field(factory=dict)
+    crash_fail = field(factory=bool)
+
     ####################
     # Inbox            #
     ####################
@@ -69,7 +74,7 @@ class Node:
 
             # Save peer info
             pi = PeerInformation(
-                message.id, message.router_address, message.publisher_address, True
+                message.id, message.router_address, message.publisher_address
             )
             self.peers[message.id] = pi
 
@@ -77,6 +82,10 @@ class Node:
             req = await aiozmq.create_zmq_stream(zmq.REQ)
             await req.transport.connect(message.router_address)
             self.sockets[message.id] = req
+
+            self.is_peer_alive[message.id] = True
+        elif message["message_type"] == "HealthCheck":
+            pass
         else:
             self.my_logger.warning(f"Received unknown message type {message}")
 
@@ -89,45 +98,59 @@ class Node:
         while True:
             recv = await self._router.read()
 
-            # msg = recv[2].decode()
-            msg = msgpack.unpackb(recv[2])
-            router_response = b"OK"
+            if self.crash_fail:
+                print("am crashed teehee")
+            else:
+                msg = msgpack.unpackb(recv[2])
+                router_response = b"OK"
 
-            asyncio.create_task(self.inbox(msg))
+                asyncio.create_task(self.inbox(msg))
 
-            self._router.write([recv[0], b"", router_response])
+                self._router.write([recv[0], b"", router_response])
 
     async def subscriber_listener(self):
         self.my_logger.debug("Starting Subscriber")
         while True:
             recv = await self._subscriber.read()
 
-            msg = recv.decode()
-
-            asyncio.create_task(self.inbox(msg))
+            if self.crash_fail:
+                pass
+            else:
+                msg = recv.decode()
+                asyncio.create_task(self.inbox(msg))
 
     ####################
     # Message Sending  #
     ####################
     async def publish_message(self, pub: dict):
-        message = asdict(pub).encode()
+        message = msgpack.packb(asdict(pub))
 
         self._publisher.write([pub.topic.encode(), message])
 
     async def naive_direct_message(self, message, receiver: str):
-        # Used only for the peer discovery phase of nodes and testing
-        req = await aiozmq.create_zmq_stream(zmq.REQ)
+        success = False
 
-        await req.transport.connect(receiver)
-        self.my_logger.info(f"Successfully connected to {receiver}")
+        try:
+            async with asyncio.timeout(5):
+                req = await aiozmq.create_zmq_stream(zmq.REQ)
+                await req.transport.connect(receiver)
+                self.my_logger.info(f"Successfully connected to {receiver}")
 
-        message = msgpack.packb(asdict(message))
+                message = msgpack.packb(asdict(message))
 
-        async with self.rep_lock:
-            req.write([message])
+                async with self.rep_lock:
+                    req.write([message])
 
-    async def robust_direct_message(self, message, id: str):
-        if self.peers[id].alive:
+                success = True
+        except asyncio.TimeoutError:
+            self.my_logger.info(f"Didnt receive response from {receiver}")
+
+        return success
+
+    async def robust_direct_message(self, message, id: str) -> bool:
+        success = False
+
+        if self.is_peer_alive[id]:
             message = msgpack.packb(asdict(message))
 
             async with self.rep_lock:
@@ -139,21 +162,22 @@ class Node:
                         async with asyncio.timeout(1):
                             await self.sockets[id].read()
                             self.my_logger.info(f"Received response from {id}")
+                            success = True
                             break
                     except asyncio.TimeoutError:
-                        self.my_logger.warning(
+                        self.my_logger.info(
                             f"Didnt receive response from {id}, attempt: {attempts}"
                         )
                         attempts += 1
                         await asyncio.sleep(1)
                 else:
-                    self.my_logger.error(
+                    self.my_logger.warning(
                         f"No reponse received from {id} after {attempts} attempts"
                     )
 
-                    self.peers[id].alive = False
+                    self.is_peer_alive[id] = False
 
-                    # TODO: queue node in a health checker task
+        return success
 
     ####################
     # Node Message Bus #
@@ -165,6 +189,32 @@ class Node:
             asyncio.create_task(self.unsubscribe(command_obj))
         else:
             self.my_logger.error(f"Unrecognised command object: {command_obj}")
+
+    ####################
+    # Scheduled Tasks  #
+    ####################
+    async def health_check_task(self):
+        offline_peers = [
+            node_id for node_id in list(self.peers) if not self.is_peer_alive[node_id]
+        ]
+
+        for peer_id in offline_peers:
+            if not self.is_peer_alive[peer_id]:
+                hc = HealthCheck("HealthCheck")
+                success = await self.naive_direct_message(
+                    hc, self.peers[peer_id].router_address
+                )
+                print(success)
+                if success:
+                    self.my_logger.error(f"Node {peer_id} is back online")
+                    req = await aiozmq.create_zmq_stream(zmq.REQ)
+                    await req.transport.connect(self.peers[peer_id].router_address)
+                    self.sockets[peer_id] = req
+                    self.is_peer_alive[peer_id] = True
+                else:
+                    self.my_logger.error(f"Node {peer_id} is still offline")
+        else:
+            self.my_logger.info("All nodes online")
 
     ####################
     # Helper Functions #
@@ -222,6 +272,14 @@ class Node:
         asyncio.create_task(self.router_listener())
         asyncio.create_task(self.subscriber_listener())
 
+        self.scheduler.add_job(
+            self.health_check_task,
+            trigger="interval",
+            seconds=20,
+        )
+
+        self.scheduler.start()
+
         await asyncio.sleep(random.randint(1, 3))
 
-        self.my_logger.info(f"Node {self.id} started")
+        self.my_logger.info("STARTED")

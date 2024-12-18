@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "aiozmq>=1.0.0",
+    "apscheduler>=3.11.0",
     "attrs>=24.2.0",
     "colorlog>=6.9.0",
     "msgpack>=1.1.0",
