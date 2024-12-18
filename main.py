@@ -1,11 +1,9 @@
 import asyncio
 import signal
 import uvloop
-import time
 import os
-import random
 
-from node import Node
+from node import Node, HealthCheck
 from logs import get_logger
 
 logging = get_logger("runner")
@@ -64,29 +62,10 @@ async def main():
 
     await asyncio.sleep(5)
 
-    # pad = 10**935
-    # for i in range(1, 1000):
-    #     # Randomize the process of sending commands with a certain probability
-    #     if random.random() < 0.5:  # Adjust probability as needed
-    #         # logging.error(f"Node {docker_node_id} sending commands at iteration {i}")
-    #         for _ in range(random.randint(5, 15)):
-    #             gos = Gossip(
-    #                 message_type="Gossip", timestamp=int(time.time()), padding=pad
-    #             )
-    #             this_node.command(gos)
+    hc = HealthCheck("HealthCheck", False)
 
-    #     await asyncio.sleep(random.randint(1, 2))
-
-    # await asyncio.sleep(15)
-
-    # url = "http://localhost:8000/current_latency/"
-    # r = requests.post(url, json={"data": this_node.current_latency_metadata})
-    # print(r.status_code)
-
-    # url = "http://localhost:8000/delivered_latency/"
-    # print(this_node.delivered_msg_metadata)
-    # r = requests.post(url, json={"data": this_node.delivered_msg_metadata})
-    # print(r.status_code)
+    for id in list(this_node.peers.keys())[:3]:
+        await this_node.robust_direct_message(hc, str(id))
 
 
 async def shutdown(signal, loop):

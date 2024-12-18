@@ -1,14 +1,18 @@
 from attrs import define, field, asdict, frozen, validators
+from typing import Union
 import asyncio
 import aiozmq
 import zmq
-import json
 import random
-import time
-import math
 import msgpack
 
 from logs import get_logger
+
+
+@frozen
+class HealthCheck:
+    message_type: str = field(validator=[validators.instance_of(str)])
+    alive: bool = field(validator=[validators.instance_of(bool)])
 
 
 @frozen
@@ -60,8 +64,6 @@ class Node:
     # Inbox            #
     ####################
     async def inbox(self, message):
-        print(f"[{self.id}] Inbox Received Message {message}")
-
         if message["message_type"] == "PeerDiscovery":
             message = PeerDiscovery(**message)
 
@@ -75,6 +77,8 @@ class Node:
             req = await aiozmq.create_zmq_stream(zmq.REQ)
             await req.transport.connect(message.router_address)
             self.sockets[message.id] = req
+        else:
+            self.my_logger.warning(f"Received unknown message type {message}")
 
     ####################
     # Listeners        #
@@ -110,54 +114,46 @@ class Node:
 
         self._publisher.write([pub.topic.encode(), message])
 
-    async def direct_message(self, message, receiver: str):
+    async def naive_direct_message(self, message, receiver: str):
+        # Used only for the peer discovery phase of nodes and testing
         req = await aiozmq.create_zmq_stream(zmq.REQ)
 
-        attempts = 0
-        while attempts < 10:
-            try:
-                async with asyncio.timeout(1):
-                    await req.transport.connect(receiver)
-                    self.my_logger.info(f"Successfully connected to {receiver}")
-                    break
-            except asyncio.TimeoutError:
-                self.my_logger.warning(
-                    f"Couldnt connect to {receiver}, attempt: {attempts}"
-                )
-                req.close()
-                req = await aiozmq.create_zmq_stream(zmq.REQ)
-                attempts += 1
-                await asyncio.sleep(1)
-        else:
-            self.my_logger.error(
-                f"Failed to connect to {receiver} after {attempts} attempts"
-            )
+        await req.transport.connect(receiver)
+        self.my_logger.info(f"Successfully connected to {receiver}")
 
         message = msgpack.packb(asdict(message))
-        # message = json.dumps(asdict(message)).encode()
 
         async with self.rep_lock:
             req.write([message])
 
-            attempts = 0
-            while attempts < 50:
-                try:
-                    async with asyncio.timeout(1):
-                        await req.read()
-                        self.my_logger.info(f"Received response from {receiver}")
-                        break
-                except asyncio.TimeoutError:
-                    self.my_logger.warning(
-                        f"Didnt receive response from {receiver}, attempt: {attempts}"
-                    )
-                    attempts += 1
-                    await asyncio.sleep(1)
-            else:
-                self.my_logger.error(
-                    f"No reponse received from {receiver} after {attempts} attempts"
-                )
+    async def robust_direct_message(self, message, id: str):
+        if self.peers[id].alive:
+            message = msgpack.packb(asdict(message))
 
-        req.close()
+            async with self.rep_lock:
+                self.sockets[id].write([message])
+
+                attempts = 0
+                while attempts < 10:
+                    try:
+                        async with asyncio.timeout(1):
+                            await self.sockets[id].read()
+                            self.my_logger.info(f"Received response from {id}")
+                            break
+                    except asyncio.TimeoutError:
+                        self.my_logger.warning(
+                            f"Didnt receive response from {id}, attempt: {attempts}"
+                        )
+                        attempts += 1
+                        await asyncio.sleep(1)
+                else:
+                    self.my_logger.error(
+                        f"No reponse received from {id} after {attempts} attempts"
+                    )
+
+                    self.peers[id].alive = False
+
+                    # TODO: queue node in a health checker task
 
     ####################
     # Node Message Bus #
@@ -186,7 +182,7 @@ class Node:
 
         # Send the PD message to all peers
         for ip in routers:
-            await self.direct_message(pd, ip)
+            await self.naive_direct_message(pd, ip)
 
     async def subscribe_to_all_peers_and_topics(self):
         # peer_id is a key from the self.peers dict
