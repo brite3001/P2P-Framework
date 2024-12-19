@@ -187,6 +187,10 @@ class Node:
             asyncio.create_task(self.subscribe(command_obj))
         elif isinstance(command_obj, UnsubscribeFromTopic):
             asyncio.create_task(self.unsubscribe(command_obj))
+        elif isinstance(command_obj, PeerDiscovery):
+            asyncio.create_task(self.naive_direct_message(command_obj, receiver))
+        elif isinstance(command_obj, HealthCheck):
+            asyncio.create_task(self.naive_direct_message(command_obj, receiver))
         else:
             self.my_logger.error(f"Unrecognised command object: {command_obj}")
 
@@ -214,7 +218,7 @@ class Node:
                 else:
                     self.my_logger.error(f"Node {peer_id} is still offline")
         else:
-            self.my_logger.info("All nodes online")
+            self.my_logger.error("All nodes online")
 
     ####################
     # Helper Functions #
@@ -232,7 +236,7 @@ class Node:
 
         # Send the PD message to all peers
         for ip in routers:
-            await self.naive_direct_message(pd, ip)
+            self.command(pd, ip)
 
     async def subscribe_to_all_peers_and_topics(self):
         # peer_id is a key from the self.peers dict
