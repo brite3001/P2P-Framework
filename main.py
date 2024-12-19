@@ -4,7 +4,7 @@ import uvloop
 import os
 import random
 
-from node import Node, HealthCheck
+from node import Node, TestPayload
 from logs import get_logger
 
 logging = get_logger("runner")
@@ -63,7 +63,7 @@ async def main():
 
     await asyncio.sleep(5)
 
-    hc = HealthCheck("HealthCheck")
+    hc = TestPayload("TestPayload")
 
     for id in list(this_node.peers.keys())[:3]:
         await this_node.robust_direct_message(hc, str(id))
