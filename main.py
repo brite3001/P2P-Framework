@@ -4,7 +4,7 @@ import uvloop
 import os
 import random
 
-from node import Node, TestPayload
+from node import Node, TestPayload, TestPublish, SubscribeToPublisher
 from logs import get_logger
 
 logging = get_logger("runner")
@@ -63,23 +63,12 @@ async def main():
 
     await asyncio.sleep(5)
 
-    hc = TestPayload("TestPayload")
+    await this_node.subscribe_to_all_peers_and_topics()
+    this_node.command(SubscribeToPublisher("test"))
 
-    for id in list(this_node.peers.keys())[:3]:
-        await this_node.robust_direct_message(hc, str(id))
-
-    if this_node.id == "0":
-        logging.error("Ive CRASH FAILED")
-        this_node.crash_fail = True
-
-    while True:
-        if this_node.id != "0":
-            await this_node.robust_direct_message(hc, "0")
-            await asyncio.sleep(15)
-        else:
-            await asyncio.sleep(45)
-            this_node.crash_fail = False
-            logging.error("Im BACK ONLINE")
+    for _ in range(10):
+        this_node.command(TestPublish("TestPublish", "test"))
+        await asyncio.sleep(5)
 
 
 async def shutdown(signal, loop):
