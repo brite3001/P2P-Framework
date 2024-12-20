@@ -1,10 +1,12 @@
 from attrs import define, field, asdict, frozen, validators
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from collections import defaultdict
 import asyncio
 import aiozmq
 import zmq
 import random
 import msgpack
+import string
 
 from logs import get_logger
 
@@ -15,16 +17,43 @@ class HealthCheck:
 
 
 @frozen
-class TestPayload:
+class TestReqRep:
     message_type: str = field(validator=[validators.instance_of(str)])
-    payload: str = "".ljust(250, "e")  # 250 bytes
+    payload: str = field(
+        factory=lambda: "".join(
+            random.choices(string.ascii_letters + string.digits, k=250)
+        )
+    )
 
 
 @frozen
-class TestPublish:
+class TestPubSub:
     message_type: str = field(validator=[validators.instance_of(str)])
     topic: str = field(validator=[validators.instance_of(str)])
-    payload: str = "".ljust(250, "e")  # 250 bytes
+    payload: str = field(
+        factory=lambda: "".join(
+            random.choices(string.ascii_letters + string.digits, k=250)
+        )
+    )
+
+
+@frozen
+class PBPayload:
+    message_type: str = field(validator=[validators.instance_of(str)])
+    topic: str = field(validator=[validators.instance_of(str)])
+    creator: str = field(validator=[validators.instance_of(str)])
+    payload: str = field(
+        factory=lambda: "".join(
+            random.choices(string.ascii_letters + string.digits, k=250)
+        )
+    )
+
+
+@frozen
+class PBCertificate:
+    message_type: str = field(validator=[validators.instance_of(str)])
+    pb_payload_hash: int = field(validator=[validators.instance_of(int)])
+    certificate_number: int = field(validator=[validators.instance_of(int)])
 
 
 @frozen
@@ -77,6 +106,18 @@ class Node:
     is_peer_alive: dict[str, bool] = field(factory=dict)
     crash_fail = field(factory=bool)
 
+    # Provable Broadcast
+    created_pb_payloads: list = field(factory=list)
+    cert_0: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
+    cert_1: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
+    cert_2: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
+    cert_3: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
+
+    cert_0_flags: dict[int, asyncio.Event] = field(factory=dict)
+    cert_1_flags: dict[int, asyncio.Event] = field(factory=dict)
+    cert_2_flags: dict[int, asyncio.Event] = field(factory=dict)
+    cert_3_flags: dict[int, asyncio.Event] = field(factory=dict)
+
     ####################
     # Inbox            #
     ####################
@@ -96,11 +137,53 @@ class Node:
             self.sockets[message.id] = req
 
             self.is_peer_alive[message.id] = True
-        elif message["message_type"] == "TestPayload":
-            self.my_logger.warning("Test payload")
-        elif message["message_type"] == "TestPublish":
-            self.my_logger.warning("Test publish")
-        elif message["message_type"] in ["HealthCheck"]:
+        elif message["message_type"] == "PBPayload":
+            """
+            Party i:
+                For first <v, proof> received from s:
+                    If EV_1(v,proof) then send <v, proof>_i to s
+
+                For first <v, cert_1(v)> received from s:
+                    If EV_2(v, cert_1(v)) then send <v, cert_1(v)>_i to s
+                    
+                For first <v, cert_2(v)> received from s:
+                    If EV_3(v, cert_2(v)) then send <v, cert_2(v)>_i to s
+
+                For first <v, cert_3(v)> received from s:
+                    If EV_4(v, cert_3(v)) then 
+                        Deliver v; and
+                        send <v, cert_3(v)>_i to s
+            """
+            # TODO: add signatures + sig checks
+            message = PBPayload(**message)
+            message_hash = hash(message)
+            self.my_logger.info(f"PBPayload received {message_hash}")
+            pbc = PBCertificate("PBCertificate", message_hash, 0)
+
+            self.command(pbc, message.creator)
+        elif message["message_type"] == "PBCertificate":
+            # TODO: add signature checks
+            # TODO: add external validity checks
+            message = PBCertificate(**message)
+            if message.pb_payload_hash in self.created_pb_payloads:
+                print(f"got cert {message.certificate_number}")
+                if message.certificate_number == 0:
+                    self.cert_0[message.pb_payload_hash].append(message)
+                    if len(self.cert_0[message.pb_payload_hash]) >= 9:
+                        print(len(self.cert_0[message.pb_payload_hash]))
+                        self.cert_0_flags[message.pb_payload_hash].set()
+                elif message.certificate_number == 1:
+                    self.cert_1[message.pb_payload_hash] += message
+                elif message.certificate_number == 2:
+                    self.cert_2[message.pb_payload_hash] += message
+                elif message.certificate_number == 3:
+                    self.cert_3[message.pb_payload_hash] += message
+
+        elif message["message_type"] == "TestReqRep":
+            self.my_logger.info("Test payload")
+        elif message["message_type"] == "TestPubSub":
+            self.my_logger.info("Test publish")
+        elif message["message_type"] == "HealthCheck":
             pass
         else:
             self.my_logger.warning(f"Received unknown message type {message}")
@@ -139,7 +222,6 @@ class Node:
     # Message Sending  #
     ####################
     async def publish_message(self, pub: dict):
-        print("sending pub")
         message = msgpack.packb(asdict(pub))
 
         self._publisher.write([pub.topic.encode(), message])
@@ -201,6 +283,42 @@ class Node:
         return success
 
     ####################
+    # Broadcast Algorithms #
+    ####################
+
+    async def provable_broadcast(self, message: PBPayload):
+        """
+        send <v, proof> to all
+        send <v, cert_1(v)> to all when you obtain cert_1(v)
+        send <v, cert_2(v)> to all when you obtain cert_2(v)
+        send <v, cert_3(v)> to all when you obtain cert_3(v)
+
+        Cert_1(v), "key-certificate for v":
+            n-f distinct signers on <v, proof>
+
+        Cert_2(v), "lock-certificate for v":
+            n-f distinct signers on <v, cert_1(v)>
+
+        Cert_3(v), "delivery-certifiacte for v":
+            n-f distinct signers on <v, cert_2(v)>
+
+        Cert_4(v), "robust-certificate for v":
+            n-f distinct signers on <v, cert_3(v)>
+
+        """
+        message_hash = hash(message)
+        self.cert_0_flags[message_hash] = asyncio.Event()
+
+        self.created_pb_payloads.append(hash(message))
+        asyncio.create_task(self.publish_message(message))
+
+        print("waiting to get all cert_0...")
+
+        await self.cert_0_flags[message_hash].wait()
+
+        print("got all cert_0!")
+
+    ####################
     # Node Message Bus #
     ####################
     def command(self, command_obj, receiver=""):
@@ -208,13 +326,17 @@ class Node:
             asyncio.create_task(self.subscribe(command_obj))
         elif isinstance(command_obj, UnsubscribeFromTopic):
             asyncio.create_task(self.unsubscribe(command_obj))
+        elif isinstance(command_obj, PBPayload):
+            asyncio.create_task(self.provable_broadcast(command_obj))
+        elif isinstance(command_obj, PBCertificate):
+            asyncio.create_task(self.robust_direct_message(command_obj, receiver))
         elif isinstance(command_obj, PeerDiscovery):
             asyncio.create_task(self.naive_direct_message(command_obj, receiver))
         elif isinstance(command_obj, HealthCheck):
             asyncio.create_task(self.naive_direct_message(command_obj, receiver))
-        elif isinstance(command_obj, TestPayload):
+        elif isinstance(command_obj, TestReqRep):
             asyncio.create_task(self.robust_direct_message(command_obj, receiver))
-        elif isinstance(command_obj, TestPublish):
+        elif isinstance(command_obj, TestPubSub):
             asyncio.create_task(self.publish_message(command_obj))
         else:
             self.my_logger.error(f"Unrecognised command object: {command_obj}")
@@ -263,6 +385,9 @@ class Node:
     ####################
     # Helper Functions #
     ####################
+
+    async def external_validity():
+        return True
 
     async def peer_discovery(self, routers: list):
         pd = PeerDiscovery(
@@ -316,13 +441,13 @@ class Node:
         asyncio.create_task(self.router_listener())
         asyncio.create_task(self.subscriber_listener())
 
-        self.scheduler.add_job(
-            self.health_check_task,
-            trigger="interval",
-            seconds=20,
-        )
+        # self.scheduler.add_job(
+        #     self.health_check_task,
+        #     trigger="interval",
+        #     seconds=20,
+        # )
 
-        self.scheduler.start()
+        # self.scheduler.start()
 
         await asyncio.sleep(random.randint(1, 3))
 

@@ -4,7 +4,7 @@ import uvloop
 import os
 import random
 
-from node import Node, TestPayload, TestPublish, SubscribeToPublisher
+from node import Node, PBPayload, SubscribeToPublisher, TestPubSub
 from logs import get_logger
 
 logging = get_logger("runner")
@@ -61,14 +61,24 @@ async def main():
         f"All nodes ready {len(list(this_node.peers.keys()))} / {len(router_list)} "
     )
 
+    this_node.command(TestPubSub("TestPubSub", "test"))
+    this_node.command(TestPubSub("TestPubSub", "PBPayload"))
+
+    await asyncio.sleep(1)
+
+    this_node.command(TestPubSub("TestPubSub", "test"))
+    this_node.command(TestPubSub("TestPubSub", "PBPayload"))
+
     await asyncio.sleep(5)
 
     await this_node.subscribe_to_all_peers_and_topics()
     this_node.command(SubscribeToPublisher("test"))
+    this_node.command(SubscribeToPublisher("PBCertificate"))
 
     for _ in range(10):
-        this_node.command(TestPublish("TestPublish", "test"))
-        await asyncio.sleep(5)
+        if this_node.id == "0":
+            this_node.command(PBPayload("PBPayload", "PBPayload", this_node.id))
+            await asyncio.sleep(10)
 
 
 async def shutdown(signal, loop):
