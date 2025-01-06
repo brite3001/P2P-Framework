@@ -52,6 +52,8 @@ class PBPayload:
 @frozen
 class PBCertificate:
     message_type: str = field(validator=[validators.instance_of(str)])
+    topic: str = field(validator=[validators.instance_of(str)])
+    creator: str = field(validator=[validators.instance_of(str)])
     pb_payload_hash: int = field(validator=[validators.instance_of(int)])
     certificate_number: int = field(validator=[validators.instance_of(int)])
 
@@ -108,6 +110,8 @@ class Node:
 
     # Provable Broadcast
     created_pb_payloads: list = field(factory=list)
+    received_pb_payloads: list = field(factory=list)
+    pb_payloads: list = field(factory=list)
     cert_0: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
     cert_1: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
     cert_2: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
@@ -157,15 +161,21 @@ class Node:
             # TODO: add signatures + sig checks
             message = PBPayload(**message)
             message_hash = hash(message)
+            self.pb_payloads.append(message)
+            self.received_pb_payloads.append(message_hash)
             self.my_logger.info(f"PBPayload received {message_hash}")
-            pbc = PBCertificate("PBCertificate", message_hash, 0)
+            pbc = PBCertificate(
+                "PBCertificate", "PBCertificate", self.id, message_hash, 0
+            )
 
             self.command(pbc, message.creator)
         elif message["message_type"] == "PBCertificate":
             # TODO: add signature checks
             # TODO: add external validity checks
             message = PBCertificate(**message)
+            message_hash = hash(message)
             if message.pb_payload_hash in self.created_pb_payloads:
+                # This part is for PBPayload creators
                 print(f"got cert {message.certificate_number}")
                 if message.certificate_number == 0:
                     self.cert_0[message.pb_payload_hash].append(message)
@@ -173,11 +183,28 @@ class Node:
                         print(len(self.cert_0[message.pb_payload_hash]))
                         self.cert_0_flags[message.pb_payload_hash].set()
                 elif message.certificate_number == 1:
-                    self.cert_1[message.pb_payload_hash] += message
+                    self.cert_1[message.pb_payload_hash].append(message)
+                    if len(self.cert_1[message.pb_payload_hash]) >= 9:
+                        print(len(self.cert_1[message.pb_payload_hash]))
+                        self.cert_1_flags[message.pb_payload_hash].set()
                 elif message.certificate_number == 2:
-                    self.cert_2[message.pb_payload_hash] += message
+                    self.cert_2[message.pb_payload_hash].append(message)
+                    if len(self.cert_2[message.pb_payload_hash]) >= 9:
+                        print(len(self.cert_2[message.pb_payload_hash]))
+                        self.cert_2_flags[message.pb_payload_hash].set()
                 elif message.certificate_number == 3:
-                    self.cert_3[message.pb_payload_hash] += message
+                    self.cert_3[message.pb_payload_hash].append(message)
+                    if len(self.cert_3[message.pb_payload_hash]) >= 9:
+                        print(len(self.cert_3[message.pb_payload_hash]))
+                        self.cert_3_flags[message.pb_payload_hash].set()
+            elif message.pb_payload_hash in self.received_pb_payloads:
+                # This part for PBPayload Receivers
+                if message.certificate_number == 1:
+                    self.command(message, message.creator)
+                elif message.certificate_number == 2:
+                    self.command(message, message.creator)
+                elif message.certificate_number == 3:
+                    self.command(message, message.creator)
 
         elif message["message_type"] == "TestReqRep":
             self.my_logger.info("Test payload")
@@ -307,6 +334,8 @@ class Node:
 
         """
         message_hash = hash(message)
+
+        # Cert 0
         self.cert_0_flags[message_hash] = asyncio.Event()
 
         self.created_pb_payloads.append(hash(message))
@@ -316,7 +345,38 @@ class Node:
 
         await self.cert_0_flags[message_hash].wait()
 
-        print("got all cert_0!")
+        # Cert 1
+        self.cert_1_flags[message_hash] = asyncio.Event()
+        pbc = PBCertificate("PBCertificate", "PBCertificate", self.id, message_hash, 1)
+        asyncio.create_task(self.publish_message(pbc))
+
+        print("waiting to get all cert_1...")
+
+        await self.cert_1_flags[message_hash].wait()
+
+        print("got all cert_1!")
+
+        # Cert 2
+        self.cert_2_flags[message_hash] = asyncio.Event()
+        pbc = PBCertificate("PBCertificate", "PBCertificate", self.id, message_hash, 2)
+        asyncio.create_task(self.publish_message(pbc))
+
+        print("waiting to get all cert_2...")
+
+        await self.cert_2_flags[message_hash].wait()
+
+        print("got all cert_2!")
+
+        # Cert 3
+        self.cert_3_flags[message_hash] = asyncio.Event()
+        pbc = PBCertificate("PBCertificate", "PBCertificate", self.id, message_hash, 3)
+        asyncio.create_task(self.publish_message(pbc))
+
+        print("waiting to get all cert_3...")
+
+        await self.cert_3_flags[message_hash].wait()
+
+        print("got all cert_3!")
 
     ####################
     # Node Message Bus #
