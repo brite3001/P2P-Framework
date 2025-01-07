@@ -109,9 +109,11 @@ class Node:
     crash_fail = field(factory=bool)
 
     # Provable Broadcast
-    created_pb_payloads: list = field(factory=list)
-    received_pb_payloads: list = field(factory=list)
-    pb_payloads: list = field(factory=list)
+    created_pb_payloads: list = field(factory=list)  # list of hashes
+    received_pb_payloads: list = field(factory=list)  # list of hashes
+    delivered_pb_payloads: list = field(factory=list)  # list of hashes
+    failed_pb_payloads: list = field(factory=list)  # list of hashes
+    pb_payloads: list = field(factory=list)  # pb payloads themselves
     cert_0: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
     cert_1: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
     cert_2: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
@@ -204,7 +206,8 @@ class Node:
                 elif message.certificate_number == 2:
                     self.command(message, message.creator)
                 elif message.certificate_number == 3:
-                    self.command(message, message.creator)
+                    # self.command(message, message.creator)
+                    pass
 
         elif message["message_type"] == "TestReqRep":
             self.my_logger.info("Test payload")
@@ -352,7 +355,12 @@ class Node:
 
         print("waiting to get all cert_1...")
 
-        await self.cert_1_flags[message_hash].wait()
+        try:
+            await asyncio.wait_for(self.cert_1_flags[message_hash].wait(), timeout=5)
+        except TimeoutError:
+            self.my_logger.error(f"Failed to get cert 1 for message: {message_hash}")
+            self.failed_pb_payloads.append(message_hash)
+            return
 
         print("got all cert_1!")
 
@@ -363,7 +371,12 @@ class Node:
 
         print("waiting to get all cert_2...")
 
-        await self.cert_2_flags[message_hash].wait()
+        try:
+            await asyncio.wait_for(self.cert_2_flags[message_hash].wait(), timeout=5)
+        except TimeoutError:
+            self.my_logger.error(f"Failed to get cert 2 for message: {message_hash}")
+            self.failed_pb_payloads.append(message_hash)
+            return
 
         print("got all cert_2!")
 
@@ -374,7 +387,14 @@ class Node:
 
         print("waiting to get all cert_3...")
 
-        await self.cert_3_flags[message_hash].wait()
+        try:
+            await asyncio.wait_for(self.cert_3_flags[message_hash].wait(), timeout=5)
+        except TimeoutError:
+            self.my_logger.error(f"Failed to get cert 3 for message: {message_hash}")
+            self.failed_pb_payloads.append(message_hash)
+            return
+
+        self.delivered_pb_payloads.append(message_hash)
 
         print("got all cert_3!")
 
