@@ -59,6 +59,16 @@ class PBCertificate:
 
 
 @frozen
+class GatherSet:
+    message_type: str = field(validator=[validators.instance_of(str)])
+    topic: str = field(validator=[validators.instance_of(str)])
+    creator: str = field(validator=[validators.instance_of(str)])
+    message_hashes: list = field(validator=[validators.instance_of(list)])
+    gather_round: int = field(validator=[validators.instance_of(int)])
+    gather_instance: int = field(validator=[validators.instance_of(int)])
+
+
+@frozen
 class PeerInformation:
     id: str = field(validator=[validators.instance_of(str)])
     router_address: str = field(validator=[validators.instance_of(str)])
@@ -108,12 +118,19 @@ class Node:
     is_peer_alive: dict[str, bool] = field(factory=dict)
     crash_fail = field(factory=bool)
 
+    # Gather Agreement - ACS
+    round_two: dict[int, set] = field(factory=lambda: defaultdict(set))
+    round_three: dict[int, set] = field(factory=lambda: defaultdict(set))
+    round_four: dict[int, set] = field(factory=lambda: defaultdict(set))
+    pending_gather: list = field(factory=list)  # list of hashes
+    completed_gather: list = field(factory=list)  # list of hashes
+
     # Provable Broadcast
-    created_pb_payloads: list = field(factory=list)  # list of hashes
-    received_pb_payloads: list = field(factory=list)  # list of hashes
-    delivered_pb_payloads: list = field(factory=list)  # list of hashes
-    failed_pb_payloads: list = field(factory=list)  # list of hashes
-    pb_payloads: list = field(factory=list)  # pb payloads themselves
+    created_pb_payloads: set = field(factory=set)  # list of hashes
+    received_pb_payloads: set = field(factory=set)  # list of hashes
+    delivered_pb_payloads: set = field(factory=set)  # list of hashes
+    failed_pb_payloads: set = field(factory=set)  # list of hashes
+    pb_payloads: set = field(factory=set)  # pb payloads themselves
     cert_0: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
     cert_1: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
     cert_2: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
@@ -206,8 +223,7 @@ class Node:
                 elif message.certificate_number == 2:
                     self.command(message, message.creator)
                 elif message.certificate_number == 3:
-                    # self.command(message, message.creator)
-                    pass
+                    self.command(message, message.creator)
 
         elif message["message_type"] == "TestReqRep":
             self.my_logger.info("Test payload")
@@ -397,6 +413,15 @@ class Node:
         self.delivered_pb_payloads.append(message_hash)
 
         print("got all cert_3!")
+
+    ####################
+    # Agreement Algorithms #
+    ####################
+
+    async def gather(self):
+        to_gather = (
+            self.delivered_pb_payloads - self.pending_gather - self.completed_gather
+        )
 
     ####################
     # Node Message Bus #
