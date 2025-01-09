@@ -75,10 +75,10 @@ async def main():
     this_node.command(SubscribeToPublisher("test"))
     this_node.command(SubscribeToPublisher("PBCertificate"))
 
-    for _ in range(10):
+    for _ in range(8):
         if this_node.id == "0":
             this_node.command(PBPayload("PBPayload", "PBPayload", this_node.id))
-            await asyncio.sleep(10)
+            await asyncio.sleep(1)
 
 
 async def shutdown(signal, loop):
