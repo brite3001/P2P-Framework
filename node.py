@@ -125,12 +125,13 @@ class Node:
     # Gather Agreement - ACS
     gather_instance: int = field(factory=int)
     set_s: list = field(factory=list)  # round 2
-    set_u: list = field(factory=list)  # round 3
-    set_t: list = field(factory=list)  # round 4
+    set_t: list = field(factory=list)  # round 3
     completed_gather: set = field(factory=set)  # list of hashes
 
+    gather_lock: asyncio.Lock = field(
+        factory=asyncio.Lock
+    )  # only want 1 gather instance at a time
     set_s_flag: asyncio.Event = field(factory=asyncio.Event)
-    set_u_flag: asyncio.Event = field(factory=asyncio.Event)
     set_t_flag: asyncio.Event = field(factory=asyncio.Event)
 
     # Provable Broadcast
@@ -144,7 +145,7 @@ class Node:
     cert_2: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
     cert_3: dict[int, list[PBCertificate]] = field(factory=lambda: defaultdict(list))
 
-    cert_0_flags: dict[int, asyncio.Event] = field(factory=dict)
+    proof_flags: dict[int, asyncio.Event] = field(factory=dict)
     cert_1_flags: dict[int, asyncio.Event] = field(factory=dict)
     cert_2_flags: dict[int, asyncio.Event] = field(factory=dict)
     cert_3_flags: dict[int, asyncio.Event] = field(factory=dict)
@@ -203,26 +204,26 @@ class Node:
             message_hash = hash(message)
             if message.pb_payload_hash in self.created_pb_payloads:
                 # This part is for PBPayload creators
-                print(f"got cert {message.certificate_number}")
+                self.my_logger.info(f"got cert {message.certificate_number}")
                 if message.certificate_number == 0:
                     self.cert_0[message.pb_payload_hash].append(message)
                     if len(self.cert_0[message.pb_payload_hash]) >= 9:
-                        print(len(self.cert_0[message.pb_payload_hash]))
-                        self.cert_0_flags[message.pb_payload_hash].set()
+                        self.my_logger.info(len(self.cert_0[message.pb_payload_hash]))
+                        self.proof_flags[message.pb_payload_hash].set()
                 elif message.certificate_number == 1:
                     self.cert_1[message.pb_payload_hash].append(message)
                     if len(self.cert_1[message.pb_payload_hash]) >= 9:
-                        print(len(self.cert_1[message.pb_payload_hash]))
+                        self.my_logger.info(len(self.cert_1[message.pb_payload_hash]))
                         self.cert_1_flags[message.pb_payload_hash].set()
                 elif message.certificate_number == 2:
                     self.cert_2[message.pb_payload_hash].append(message)
                     if len(self.cert_2[message.pb_payload_hash]) >= 9:
-                        print(len(self.cert_2[message.pb_payload_hash]))
+                        self.my_logger.info(len(self.cert_2[message.pb_payload_hash]))
                         self.cert_2_flags[message.pb_payload_hash].set()
                 elif message.certificate_number == 3:
                     self.cert_3[message.pb_payload_hash].append(message)
                     if len(self.cert_3[message.pb_payload_hash]) >= 9:
-                        print(len(self.cert_3[message.pb_payload_hash]))
+                        self.my_logger.info(len(self.cert_3[message.pb_payload_hash]))
                         self.cert_3_flags[message.pb_payload_hash].set()
 
             elif message.pb_payload_hash in self.received_pb_payloads:
@@ -235,26 +236,51 @@ class Node:
                     self.command(message, message.creator)
                     self.delivered_pb_payloads.add(message.pb_payload_hash)
 
-                    if len(self.delivered_pb_payloads) >= self.n - self.f:
-                        asyncio.create_task(self.gather())
+                    # Gather Round 2
+                    # Once Si contains n−f pairs send Si to every party
+                    if (
+                        len(self.delivered_pb_payloads - self.completed_gather)
+                        >= self.n - self.f
+                    ):
+                        if not self.gather_lock.locked():
+                            asyncio.create_task(self.gather())
+
         elif message["message_type"] == "GatherSet":
             message = GatherSet(**message)
 
-            if message.gather_round == 2:
-                # Check if all the messages have been PB'd
-                # SET S
+            # If you're the original sender of messagers, you'll wait to get a
+            # robust certificate before delivering a message, however, receivers will
+            # only wait for a delivery certificate. This accomidates the delay.
+            retry = 0
+            while retry < 5:
                 if set(message.message_hashes).issubset(self.delivered_pb_payloads):
+                    break
+                else:
+                    self.my_logger.info("Not all messages in subset... waiting...")
+                    await asyncio.sleep(1)
+                    retry += 1
+
+            if message.gather_round == 3:
+                # When receiving a message Sj from party, accept the message after receiving the broadcast xk
+                # from k for every (k,xk)∈Sj
+
+                if set(message.message_hashes).issubset(self.delivered_pb_payloads):
+                    # When receiving a message Sj from party, accept the message after receiving
+                    # the broadcast xk from k for every (k,xk)∈Sj
                     self.set_s.append(set(message.message_hashes))
                 else:
-                    self.my_logger.warning("Not all messages in subset")
-                    print(self.delivered_pb_payloads)
+                    self.my_logger.error("Failed to get all messages in subset")
 
-                if len(self.set_s) >= self.n - self.n:
+                if len(self.set_s) >= self.n - self.f:
                     self.set_s_flag.set()
-            elif message.gather_round == 3:
-                pass
             elif message.gather_round == 4:
-                pass
+                if set(message.message_hashes).issubset(self.delivered_pb_payloads):
+                    self.set_t.append(set(message.message_hashes))
+                else:
+                    self.my_logger.warning("Failed to get all messages in subset")
+
+                if len(self.set_t) >= self.n - self.f:
+                    self.set_t_flag.set()
 
         elif message["message_type"] == "TestReqRep":
             self.my_logger.info("Test payload")
@@ -385,22 +411,22 @@ class Node:
         """
         message_hash = hash(message)
 
-        # Cert 0
-        self.cert_0_flags[message_hash] = asyncio.Event()
+        # Broadcasting PBPayload
+        self.proof_flags[message_hash] = asyncio.Event()
 
         self.created_pb_payloads.add(hash(message))
         asyncio.create_task(self.publish_message(message))
 
-        print("waiting to get all cert_0...")
+        self.my_logger.info("waiting to get all proofs...")
 
-        await self.cert_0_flags[message_hash].wait()
+        await self.proof_flags[message_hash].wait()
 
         # Cert 1
         self.cert_1_flags[message_hash] = asyncio.Event()
         pbc = PBCertificate("PBCertificate", "PBCertificate", self.id, message_hash, 1)
         asyncio.create_task(self.publish_message(pbc))
 
-        print("waiting to get all cert_1...")
+        self.my_logger.info("waiting to get all cert_1...")
 
         try:
             await asyncio.wait_for(self.cert_1_flags[message_hash].wait(), timeout=5)
@@ -409,14 +435,14 @@ class Node:
             self.failed_pb_payloads.add(message_hash)
             return
 
-        print("got all cert_1!")
+        self.my_logger.info("got all cert_1!")
 
         # Cert 2
         self.cert_2_flags[message_hash] = asyncio.Event()
         pbc = PBCertificate("PBCertificate", "PBCertificate", self.id, message_hash, 2)
         asyncio.create_task(self.publish_message(pbc))
 
-        print("waiting to get all cert_2...")
+        self.my_logger.info("waiting to get all cert_2...")
 
         try:
             await asyncio.wait_for(self.cert_2_flags[message_hash].wait(), timeout=5)
@@ -425,14 +451,14 @@ class Node:
             self.failed_pb_payloads.add(message_hash)
             return
 
-        print("got all cert_2!")
+        self.my_logger.info("got all cert_2!")
 
         # Cert 3
         self.cert_3_flags[message_hash] = asyncio.Event()
         pbc = PBCertificate("PBCertificate", "PBCertificate", self.id, message_hash, 3)
         asyncio.create_task(self.publish_message(pbc))
 
-        print("waiting to get all cert_3...")
+        self.my_logger.info("waiting to get all cert_3...")
 
         try:
             await asyncio.wait_for(self.cert_3_flags[message_hash].wait(), timeout=5)
@@ -443,50 +469,85 @@ class Node:
 
         self.delivered_pb_payloads.add(message_hash)
 
-        print("got all cert_3!")
-        print(f"added {message_hash}")
+        self.my_logger.error(f"PB Success for {message_hash}")
 
-        if len(self.delivered_pb_payloads) >= self.n - self.f:
-            asyncio.create_task(self.gather())
+        if len(self.delivered_pb_payloads - self.completed_gather) >= self.n - self.f:
+            if not self.gather_lock.locked():
+                asyncio.create_task(self.gather())
 
     ####################
     # Agreement Algorithms #
     ####################
 
-    def gather_cleanup(self):
-        self.set_s.clear()
-        self.set_t.clear()
-        self.set_u.clear()
+    async def gather_cleanup(self):
+        self.set_s = [x for x in self.set_s if not x.issubset(self.completed_gather)]
+        self.set_t = [x for x in self.set_t if not x.issubset(self.completed_gather)]
 
         self.set_s_flag.clear()
-        self.set_u_flag.clear()
         self.set_t_flag.clear()
         self.gather_instance += 1
 
     async def gather(self):
-        gs = GatherSet(
-            "GatherSet",
-            "GatherSet",
-            self.id,
-            list(self.delivered_pb_payloads - self.completed_gather),
-            2,
-            self.gather_instance,
-        )
+        async with self.gather_lock:
+            si = list(self.delivered_pb_payloads - self.completed_gather)
 
-        self.command(gs)
+            gs = GatherSet(
+                "GatherSet",
+                "GatherSet",
+                self.id,
+                si,
+                3,
+                self.gather_instance,
+            )
 
-        await asyncio.sleep(2.5)
+            print(f"Si {self.gather_instance}: {si}")
 
-        try:
-            await asyncio.wait_for(self.set_s_flag.wait(), timeout=5)
-        except TimeoutError:
-            self.my_logger.error("Failed to n-f values in set_s")
-            self.gather_cleanup()
-            return
+            # Once Si contains n−f pairs send Si to every party
+            self.command(gs)
 
-        print(self.set_s)
+            try:
+                await asyncio.wait_for(self.set_s_flag.wait(), timeout=5)
+            except TimeoutError:
+                self.my_logger.error("Failed to n-f values in set_s")
+                self.gather_cleanup()
+                return
 
-        self.gather_cleanup()
+            ti = set()
+
+            for individual_set in self.set_s:
+                for individual_element in individual_set:
+                    ti.add(individual_element)
+
+            # After accepting n−f sets Sj, send Ti=∪Sj to all parties.
+            gs = GatherSet(
+                "GatherSet", "GatherSet", self.id, list(ti), 4, self.gather_instance
+            )
+            self.command(gs)
+
+            try:
+                await asyncio.wait_for(self.set_t_flag.wait(), timeout=5)
+            except TimeoutError:
+                self.my_logger.error("Failed to n-f values in set_t")
+                self.gather_cleanup()
+                return
+
+            # After accepting n−f sets Tj, output Ui=∪Tj.
+            ui = set()
+            for individual_set in self.set_t:
+                for individual_element in individual_set:
+                    ui.add(individual_element)
+
+            print(f"self.set_t {self.gather_instance}: {self.set_t}")
+
+            self.my_logger.warning(
+                f"Successfully Gathered {self.gather_instance}: {ui}"
+            )
+
+            self.completed_gather.update(ui)
+
+            print(f"Completed gather {self.gather_instance}: {self.completed_gather}")
+
+            await self.gather_cleanup()
 
     ####################
     # Node Message Bus #

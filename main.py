@@ -75,7 +75,7 @@ async def main():
     this_node.command(SubscribeToPublisher("test"))
     this_node.command(SubscribeToPublisher("PBCertificate"))
 
-    for _ in range(8):
+    for _ in range(16):
         if this_node.id == "0":
             this_node.command(PBPayload("PBPayload", "PBPayload", this_node.id))
             await asyncio.sleep(1)
